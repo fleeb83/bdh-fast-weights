@@ -1,0 +1,27 @@
+# Claude Code project memory — never publish
+.claude/
+
+# Training data
+data/
+
+# Checkpoints and manifests (large binary files)
+results/checkpoints/
+results/manifests/
+results/train_history.jsonl
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Model weights
+*.pt
+*.pth
+
+# Runtime state
+status.json
+
+# OS
+.DS_Store
+Thumbs.db

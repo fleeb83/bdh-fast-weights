@@ -1,0 +1,15 @@
+{
+  "label": "bpe-192",
+  "vocab_size": 192,
+  "requested_vocab_size": 192,
+  "min_pair_count": 2,
+  "max_rows_per_split": 1000,
+  "corpus_rows": 6000,
+  "special_tokens": [
+    "<pad>",
+    "<bos>",
+    "<eos>",
+    "<sep>",
+    "<answer>"
+  ]
+}
