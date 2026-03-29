@@ -8,3 +8,8 @@
 {"label": "confirm-baseline-bpe192-nohebb-s1337", "n2": 0.0, "n4": 0.0, "n8": 0.016, "timestamp": "2026-03-28T04:08:57", "notes": "encoding=bpe-192, seed=1337, confirmation"}
 {"label": "confirm-bpe-hebb-bpe192-lr3e-3-s1337", "n2": 0.99, "n4": 0.98, "n8": 0.975, "timestamp": "2026-03-28T06:47:11", "notes": "encoding=bpe-192, seed=1337, confirmation"}
 {"label": "confirm-bpe-hebb-bpe192-lr3e-3-s2026", "n2": 0.887, "n4": 0.888, "n8": 0.92, "timestamp": "2026-03-28T09:29:18", "notes": "encoding=bpe-192, seed=2026, confirmation"}
+{"label": "batch1-control-bpe192-opt3e-3-hebb1e-2-consol0-s1337", "n2": 0.972, "n4": 0.955, "n8": 0.974, "timestamp": "2026-03-28T23:51:56", "notes": "encoding=bpe-192; eval=full-best-checkpoint"}
+{"label": "batch1-dense-bpe192-opt3e-3-hebb1e-2-consol1e-4-s1337", "n2": 0.754, "n4": 0.681, "n8": 0.898, "timestamp": "2026-03-29T01:29:37", "notes": "encoding=bpe-192; eval=full-best-checkpoint"}
+{"label": "batch1-rowtop10-bpe192-opt3e-3-hebb1e-2-consol1e-4-s1337", "n2": 0.975, "n4": 0.971, "n8": 0.962, "timestamp": "2026-03-29T03:41:25", "notes": "encoding=bpe-192; eval=full-best-checkpoint"}
+{"label": "verify-control-bpe192-opt3e-3-hebb1e-2-consol0-s2026", "n2": 0.727, "n4": 0.806, "n8": 0.852, "timestamp": "2026-03-29T04:45:37", "notes": "encoding=bpe-192; eval=full-best-checkpoint"}
+{"label": "verify-rowtop10-bpe192-opt3e-3-hebb1e-2-consol1e-4-s2026", "n2": 0.925, "n4": 0.939, "n8": 0.912, "timestamp": "2026-03-29T05:25:00", "notes": "encoding=bpe-192; eval=full-best-checkpoint"}

@@ -6,6 +6,10 @@ BDH is a biologically inspired language model architecture described in [arxiv:2
 
 This repo implements it, demonstrates it works, and documents the five bugs that had to be solved to get there.
 
+## v.2 status
+
+v.2 extends this repo from transient fast weights into selective fast-to-slow consolidation. The working question is no longer only whether Hebbian fast write-back works inside an episode, but whether those episode-local updates can be selectively written into slow weights without destroying the memory signal. v.2 verifies that selective fast-to-slow consolidation is viable in this benchmark: `rowtop10` reproduces on an independent H100 run, and in the batch1 comparison it remains clearly stronger than dense writeback.
+
 ---
 
 ## What this does
@@ -49,6 +53,20 @@ Counter-benchmarks on confirmation runs:
 | confirm-bpe-hebb-bpe192-lr3e-3-s2026 | 87.8% | 87.4% | 84.8% | 94.8% |
 
 The confirmation runs exceed the original overnight results — consistent with those runs also hitting the time limit before peaking. The mechanism holds across seeds.
+
+### Consolidation update (v.2)
+
+The next question is whether fast weights can be consolidated into slow weights without collapsing the associative memory effect. A naive dense writeback rule hurt the benchmark materially. The first completed selective-consolidation run, `rowtop10`, preserved most of the BPE-192 signal and recovered nearly all of the damage introduced by dense consolidation.
+
+| Run | n2 | n4 | n8 | Interpretation |
+|---|---|---|---|---|
+| batch1-control-bpe192-opt3e-3-hebb1e-2-consol0-s1337 | 97.2% | 95.5% | 97.4% | no fast-to-slow consolidation |
+| batch1-dense-bpe192-opt3e-3-hebb1e-2-consol1e-4-s1337 | 75.4% | 68.1% | 89.8% | dense writeback degrades the signal |
+| batch1-rowtop10-bpe192-opt3e-3-hebb1e-2-consol1e-4-s1337 | 97.5% | 97.1% | 96.2% | selective writeback preserves most of the control signal |
+
+`rowtop10` uses row-targeted consolidation: after each episode, only the top 10% of decoder rows by episode-local fast-row activity are written from fast weights into slow weights. The implication is important but narrow: selective fast-to-slow consolidation looks viable in this system, while dense consolidation is too destructive. That is stronger than "consolidation failed," but it is still short of claiming the problem is fully solved.
+
+The independent H100 verification package confirms the same direction on seed 2026. The matched verification control reached `72.7% / 80.6% / 85.2%` on `n2 / n4 / n8`, while `verify-rowtop10-bpe192-opt3e-3-hebb1e-2-consol1e-4-s2026` reached `92.5% / 93.9% / 91.2%`. Its verification counter-benchmarks also stayed strong at `93.0%` on `vargap1`, `92.6%` on `vargap2`, `91.6%` on `repeated8`, and `95.0%` on `n16`.
 
 ### Counter-benchmarks (teacher-forced eval, same scorer as clean benchmark)
 
@@ -145,6 +163,7 @@ Live experiment progress, best result, all results table.
 
 ## Results files
 
+- `RELEASE_V.2.md` — local draft release notes for the consolidation update
 - `results/experiment_log.jsonl` — all BPE campaign runs with final scores
 - `results/counter_log.jsonl` — counter-benchmark results (corrected teacher-forced eval)
 - `results/counter_log_original_eval.jsonl` — original counter-benchmark results using autoregressive generation, preserved for audit (see Limitations)
@@ -163,6 +182,7 @@ Not proven on natural language yet. Not a product. Not a replacement for RAG or 
 ## Future work
 
 - Longer training runs beyond the 2-hour budget to find the true performance ceiling — all Hebbian runs were still improving at cutoff
+- Decide whether to keep the current selective-consolidation setting as the release default or continue searching for a better policy now that the first independent verification run has landed
 - Natural language validation (tinyStories or similar corpus)
 - Capacity scaling experiments (how many facts per fast buffer?)
 - Attention-guided write addressing (learn where to write, not hardcoded t-1)
