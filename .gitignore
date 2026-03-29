@@ -22,6 +22,9 @@ __pycache__/
 # Runtime state
 status.json
 
+# Local release drafting
+RELEASE_V.2.md
+
 # OS
 .DS_Store
 Thumbs.db

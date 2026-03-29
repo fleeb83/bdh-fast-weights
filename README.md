@@ -163,7 +163,6 @@ Live experiment progress, best result, all results table.
 
 ## Results files
 
-- `RELEASE_V.2.md` — local draft release notes for the consolidation update
 - `results/experiment_log.jsonl` — all BPE campaign runs with final scores
 - `results/counter_log.jsonl` — counter-benchmark results (corrected teacher-forced eval)
 - `results/counter_log_original_eval.jsonl` — original counter-benchmark results using autoregressive generation, preserved for audit (see Limitations)
