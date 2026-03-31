@@ -22,8 +22,17 @@ __pycache__/
 # Runtime state
 status.json
 
-# Local release drafting
+# Internal Claude instructions — contain private local paths and working process
+CLAUDE.md
+RELEASE_TEMPLATE.md
 RELEASE_V.2.md
+
+# Internal release drafts — not for publication
+REDDIT_POST.md
+RELEASE_BODY.md
+
+# Graph generation script — hardcoded private paths until log data is copied to results/
+docs/make_graphs.py
 
 # OS
 .DS_Store
