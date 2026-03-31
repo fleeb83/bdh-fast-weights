@@ -43,7 +43,7 @@ These items were listed as limitations in earlier releases and are now resolved:
 ## Open questions
 
 - Does the consolidation benefit hold at longer training runs past 3 hours?
-- What is the fast buffer capacity -- how many associations can it hold before interference?
+- What is the fast buffer capacity: how many associations can it hold before interference?
 - Does the mechanism improve accuracy on downstream NLP tasks, or only language modelling BPB?
 - Can the per-token Hebbian update be parallelised to close the throughput gap?
 - Does the mechanism transfer across domains and data distributions?
