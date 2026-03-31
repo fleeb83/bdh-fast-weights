@@ -1,16 +1,22 @@
 # Limitations
 
-This is a mechanism proof, not a product. The following limitations are known and documented honestly.
+This is a mechanism proof, not a product. These limitations are known and documented honestly.
+
+## What was proven
+
+The Hebbian fast-weight mechanism activates on natural language. `fast_state_norm` grows from step 1 on FineWeb-Edu and holds near 11.2 across the full run. The baseline `fast_state_norm` is 0.0 throughout. By mid-training, around step 6,000, fast weights contribute roughly twice as much as slow weights: `fast_contrib_norm` is approximately 6.9 and `slow_contrib_norm` is approximately 3.5. The model learned to use the fast buffer. Row_topk consolidation improves BPB by approximately 0.009 at 2 of 3 seeds on FineWeb-Edu.
 
 ## Training budget
 
 All v0.3 runs were stopped by the 3-hour wall-clock limit, not by convergence. Reported scores are best-within-budget. The true performance ceiling has not been found.
 
-The 0.009 BPB improvement from consolidation (row_topk) is reproduced at 2 independent seeds (1337 and 2026). A third seed (2027) completed at 1.6832 — worse than the 2-seed result and worse than the seed 2026 baseline (1.6774), but no seed 2027 baseline was run, so a paired comparison is not possible. All runs are 3-hour budget on a single small model. How the effect scales with training time is unknown.
+Mechanism activation is confirmed and is not budget-limited. `fast_state_norm` grows from step 1 and stabilises at approximately 11.2 within the 3-hour window. These observations are from 3-hour runs on a single small model.
 
-## Proven limitations
+The BPB improvement from consolidation (row_topk) reproduced at 2 of 3 seeds (1337 and 2026). A third seed (2027) completed at 1.6832, worse than the 2-seed result and worse than the seed 2026 baseline (1.6774). No seed 2027 baseline was run, so a paired comparison is not possible. Whether the BPB effect scales with longer training is unknown.
 
-- **Throughput cost is large.** Fast weight training runs at ~10,600 tokens/s. The same architecture without fast weights runs at ~65,000 tokens/s. That is roughly a 6x slowdown. The cause is the per-token Hebbian update: it is applied sequentially within each sequence and is not yet parallelised. This is an implementation constraint, not a fundamental one, but it has not been solved yet.
+## Known limitations
+
+- **Throughput cost is large.** Fast weight training runs at approximately 10,600 tokens/s. The same architecture without fast weights runs at approximately 65,000 tokens/s. That is roughly a 6x slowdown. The cause is the per-token Hebbian update: it is applied sequentially within each sequence and is not yet parallelised. This is an implementation constraint, not a fundamental one, but it has not been solved yet.
 
 - **Single model size tested.** All results are from a small BDH model. Scaling behaviour to larger parameter counts is unknown.
 
@@ -18,7 +24,7 @@ The 0.009 BPB improvement from consolidation (row_topk) is reproduced at 2 indep
 
 - **Raw byte BPB is not comparable to tokenised models.** v0.3 uses raw byte tokenisation (vocab=256) on FineWeb-Edu. Numbers from tokenised models or different architectures cannot be compared directly.
 
-## What changed in v0.3
+## Resolved in v0.3
 
 These items were listed as limitations in earlier releases and are now resolved:
 
@@ -30,14 +36,14 @@ These items were listed as limitations in earlier releases and are now resolved:
 
 ## Eval caveats
 
-- **Eval is teacher-forced, not autoregressive.** All reported BPB scores use teacher-forced next-byte prediction. Autoregressive generation quality has not been measured.
+- **Eval is teacher-forced.** All reported BPB scores use teacher-forced next-byte prediction. Autoregressive generation quality has not been measured.
 
 - **Context length is 192 tokens.** v0.3 extended context from 128 tokens (v0.1/v0.2) to 192 tokens. Behaviour on longer sequences has not been tested.
 
 ## Open questions
 
 - Does the consolidation benefit hold at longer training runs past 3 hours?
-- What is the fast buffer capacity — how many associations can it hold before interference?
+- What is the fast buffer capacity -- how many associations can it hold before interference?
 - Does the mechanism improve accuracy on downstream NLP tasks, or only language modelling BPB?
 - Can the per-token Hebbian update be parallelised to close the throughput gap?
 - Does the mechanism transfer across domains and data distributions?
