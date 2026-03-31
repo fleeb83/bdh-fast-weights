@@ -1,24 +1,34 @@
 # bdh-fast-weights
 
-The first working open-source implementation of Hebbian fast weight write-back for the BDH (Dragon Hatchling) architecture. BDH is described in [arxiv:2509.26507](https://arxiv.org/abs/2509.26507) (Kosowski et al., 2025). The paper describes a Hebbian synaptic plasticity mechanism where weights update during inference — but the [released code](https://github.com/pathwaycom/bdh) computes the co-activation product and discards it. This repo implements write-back and shows it works, first on synthetic benchmarks and then on natural language.
+BDH (Dragon Hatchling) is an architecture described in [arxiv:2509.26507](https://arxiv.org/abs/2509.26507) (Kosowski et al., 2025). The paper describes a Hebbian synaptic plasticity mechanism where weights update during inference. The [released code](https://github.com/pathwaycom/bdh) computes the co-activation product and discards it, so no write-back happens. This repo implements the write-back and shows it works, first on synthetic benchmarks and then on natural language.
 
 This is a mechanism proof, not a product.
 
 ---
 
-## Results: v0.3 — Natural language and architectural improvements
+## v0.3: Does the mechanism activate on natural language?
 
-### What changed
+Yes.
 
-- Raw byte tokenisation on FineWeb-Edu: first natural language training results
-- Per-example fast state: bs=1 constraint eliminated, 140x throughput improvement
-- Consolidation (`row_topk` selective writeback) validated on natural language across 2 seeds
+![Fast weight activation - early training](docs/img/fast_state_norm_bootstrap.png)
 
-### Natural language results
+`fast_state_norm` is non-zero from step 1 on FineWeb-Edu. Hebbian updates accumulate in the fast buffer immediately and keep accumulating. An early peak appears around step 41 (norm ~4.1), followed by a retreat as slow weights adapt to the data, then steady growth to a sustained plateau. The baseline `fast_state_norm` is 0.0 throughout.
+
+![Fast state norm - full training run](docs/img/fast_norm_sustained.png)
+
+`fast_state_norm` stabilises near 11.2 and holds there across the full training run. Baseline `fast_state_norm` is 0.0 throughout.
+
+By mid-training, `fast_contrib_norm` is approximately 6.9 and `slow_contrib_norm` is approximately 3.5. The model learned to use the fast buffer. The architecture did not force this.
+
+---
+
+## Does it show in the loss?
+
+Partially.
 
 ![Validation BPB over training](docs/img/val_bpb_comparison.png)
 
-All four runs completed. 3-hour budget on RTX 5070 Ti, context_len=192, d_model=768, batch_size=48.
+5 runs on FineWeb-Edu, raw byte tokenisation. 3-hour budget, RTX 5070 Ti, context_len=192, d_model=768, batch_size=48.
 
 | Run | Seed | Best val BPB | Best step | Tokens |
 |---|---|---|---|---|
@@ -28,41 +38,29 @@ All four runs completed. 3-hour budget on RTX 5070 Ti, context_len=192, d_model=
 | Fast weights + row_topk consolidation | 2026 | **1.6685** | 12000 | 113M |
 | Fast weights + row_topk consolidation | 2027 | 1.6832 | 12300 | 116M |
 
-Seed 2027 did not improve over the seed 2026 baseline; no seed 2027 baseline was run, so a paired comparison is not possible.
-
-Fast weights alone match baseline (1.6768 vs 1.6774 — within noise). Row_topk consolidation improves over baseline by ~0.009 BPB at seeds 1337 and 2026. A third seed (2027) produced 1.6832 — worse than the 2-seed result, but without a matched seed 2027 baseline the comparison is not clean.
+Fast weights alone match baseline within noise. Row_topk consolidation improves BPB by ~0.009 at seeds 1337 and 2026. A third seed (2027) did not reproduce it. No matched seed 2027 baseline was run, so a paired comparison is not possible.
 
 Raw byte tokenisation is a deliberate choice. BDH's addressing mechanism uses token identity codes, and byte-level tokens provide stable, consistent addresses across all input. These are 3-hour runs on a small model. The BPB numbers are not comparable to tokenised models or larger architectures.
 
-### Training dynamics
+---
 
-![Fast weight activation — early training](docs/img/fast_state_norm_bootstrap.png)
+## What changed in v0.3
 
-`fast_state_norm` is non-zero from step 1 and grows throughout training, confirming Hebbian updates are accumulating in the fast buffer immediately. An early peak appears around step 41 (norm ~4.1), followed by a retreat as slow weights adapt, then steady growth to a sustained plateau.
-
-![Fast state norm — full training run](docs/img/fast_norm_sustained.png)
-
-`fast_state_norm` stabilises near 11.2 and holds there across the full training run. Baseline `fast_state_norm` is 0.0 throughout — the mechanism is not active without write-back.
-
-By mid-training, fast weights contribute roughly twice as much as slow weights to the read output: `fast_contrib_norm` ≈ 6.9, `slow_contrib_norm` ≈ 3.5. This is not forced by the architecture — the model learned to use the fast buffer.
-
-### bs=1 constraint removed
+- Per-example fast state: the bs=1 constraint is eliminated. v0.3 uses shape `[batch, memory_size, d_model]`. At bs=48, each training step processes 9,216 tokens vs 66 in v0.2, which is 140x more per step at similar step cost.
+- Throughput cost: fast weight training runs at ~10,600 tokens/s vs ~65,000 tokens/s baseline. This is the cost of the per-token Hebbian update. It is not yet parallelised within a sequence.
+- Context length extended to 192 tokens (from 128 in v0.1/v0.2).
 
 ![Training throughput comparison](docs/img/throughput_comparison.png)
-
-v0.2 required bs=1: the shared fast buffer caused batch contamination when sequences were mixed. v0.3 uses per-example fast state with shape `[batch, memory_size, d_model]`, with an explicit forward API:
 
 ```python
 logits, next_fast_state = model(tokens, fast_state=fast_state)
 ```
 
-At bs=48, each training step processes 9,216 tokens vs 66 in v0.2 — 140x more per step at similar step cost.
-
-Honest cost: fast weight training runs at ~10.6k tokens/s. The baseline runs at ~65k tokens/s. This is the cost of the per-token Hebbian update. It is not yet parallelised within a sequence.
+Fast weight training runs at ~10,600 tokens/s. The baseline runs at ~65,000 tokens/s.
 
 ---
 
-## Results: v0.2 — Consolidation and confirmation
+## v0.2: Consolidation
 
 v0.2 asked whether fast weights can consolidate into slow weights between sequences without destroying the associative memory signal. Dense writeback did destroy it. Selective writeback (`row_topk`) preserved it.
 
@@ -99,13 +97,13 @@ Counter-benchmarks on confirmation runs:
 
 Five implementation bugs were found and fixed during development. See [BUGS.md](BUGS.md).
 
-Note on eval methodology: an earlier version of the counter-benchmarks used autoregressive generation and showed apparent collapse — that was a scorer mismatch, not a mechanism failure. Both logs are preserved in `results/` for audit.
+Note on eval methodology: an earlier version of the counter-benchmarks used autoregressive generation and showed apparent collapse. That was a scorer mismatch, not a mechanism failure. Both logs are preserved in `results/` for audit.
 
 ---
 
-## Results: v0.1 — Mechanism proof (synthetic benchmarks)
+## v0.1: Synthetic benchmarks
 
-v0.1 established that Hebbian fast-weight write-back works on synthetic n-back associative recall. The only path to above-chance performance is correctly writing and reading associations — no language modelling shortcuts are available. Baseline (no write-back): 1.0% n8 (random chance for vocab size 64).
+v0.1 established that Hebbian fast-weight write-back works on synthetic n-back associative recall. Synthetic benchmarks were the starting point because the only path to above-chance performance is correctly writing and reading associations, with no language modelling shortcuts available. Baseline (no write-back): 1.0% n8 (random chance for vocab size 64).
 
 | Run | n2 | n4 | n8 | Stopped |
 |---|---|---|---|---|
@@ -128,13 +126,13 @@ At read time, slow and fast weights combine:
 output = xy @ decoder + x_sparse @ decoder_fast
 ```
 
-Slow weights (`decoder`) hold general knowledge learned by gradient descent. Fast weights (`decoder_fast`) hold associations from the current sequence, written by Hebbian update. The fast buffer is zeroed before each sequence — no cross-sequence memory accumulation.
+Slow weights (`decoder`) hold general knowledge learned by gradient descent. Fast weights (`decoder_fast`) hold associations from the current sequence, written by Hebbian update. The fast buffer is zeroed before each sequence. No cross-sequence memory accumulation.
 
 ---
 
 ## Architecture constraints
 
-**Batch size.** Resolved in v0.3. v0.2 required bs=1 — shared fast buffer. v0.3 uses per-example fast state, enabling batch_size=48.
+**Batch size.** Resolved in v0.3. v0.2 required bs=1 (shared fast buffer). v0.3 uses per-example fast state, enabling batch_size=48.
 
 **Throughput.** ~10.6k tokens/s with fast weights vs ~65k tokens/s baseline. Cost of the per-token Hebbian update. Not yet parallelised within a sequence.
 
@@ -168,7 +166,7 @@ Run counter-benchmarks against a saved checkpoint:
 python eval_counter.py results/checkpoints/<checkpoint>.pt
 ```
 
-`prepare.py` contains the fixed eval and is never modified — this prevents reward hacking. All result logs are append-only. Nothing is overwritten.
+`prepare.py` contains the fixed eval and is never modified. This prevents reward hacking. All result logs are append-only. Nothing is overwritten.
 
 ### Hardware
 
@@ -183,33 +181,35 @@ python dashboard.py              # http://localhost:5000
 
 ### Results files
 
-- `results/experiment_log.jsonl` — all BPE campaign runs with final scores
-- `results/counter_log.jsonl` — counter-benchmark results (corrected teacher-forced eval)
-- `results/counter_log_original_eval.jsonl` — original autoregressive eval results, preserved for audit
-- `results/eval_history.jsonl` — per-checkpoint eval scores across training
-- `results/char_level_experiment_log.jsonl` — all 16 character-level experiments from the initial research phase
-- `snapshots/exp11_xsprev_shared_fastbuf_lr1e2_bs1.py` — frozen standalone script for the first working experiment (char-level, n8=64%), independently runnable
+- `results/experiment_log.jsonl`: all BPE campaign runs with final scores
+- `results/counter_log.jsonl`: counter-benchmark results (corrected teacher-forced eval)
+- `results/counter_log_original_eval.jsonl`: original autoregressive eval results, preserved for audit
+- `results/eval_history.jsonl`: per-checkpoint eval scores across training
+- `results/char_level_experiment_log.jsonl`: all 16 character-level experiments from the initial research phase
+- `snapshots/exp11_xsprev_shared_fastbuf_lr1e2_bs1.py`: frozen standalone script for the first working experiment (char-level, n8=64%), independently runnable
 
 ---
 
 ## What this is
 
-A mechanism proof. Hebbian fast-weight write-back works on synthetic associative recall benchmarks and activates on natural language text. Row_topk consolidation shows a ~0.009 BPB improvement at 2 of 3 seeds. A third seed (2027) did not reproduce the improvement; a matched baseline for that seed was not run. Results are reproducible across independent seeds on both synthetic and natural language benchmarks.
+The Hebbian fast-weight mechanism is active on natural language. fast_state_norm grows from step 1 and holds near 11.2. Baseline fast_state_norm is 0.0. The model learned to use the fast buffer. Fast weights contribute roughly twice as much as slow weights by mid-training.
+
+Row_topk consolidation improves BPB by ~0.009 at 2 of 3 seeds on FineWeb-Edu. A third seed (2027) did not reproduce it.
 
 ## What this is not
 
-Not yet validated for general language modelling tasks. The 0.009 BPB consolidation improvement is real and reproducible, but it is small and comes from 3-hour runs on a small model. Not a replacement for RAG or fine-tuning. Not the full BDH internal implementation — Pathway has not released that, and this is not it.
+Not validated on general language modelling tasks beyond the runs described. The BPB improvement is real at 2 seeds and small. These are 3-hour runs on a small model trained on raw bytes. Not a replacement for RAG or fine-tuning. Not Pathway's internal BDH implementation.
 
-Eval is teacher-forced, not autoregressive. Reported accuracies reflect teacher-forced exact-span scoring.
+Eval is teacher-forced. Reported accuracies reflect teacher-forced exact-span scoring, not autoregressive generation.
 
 ---
 
 ## Future work
 
-- v0.4: minimum viable context window experiment — find the floor below which fast-weight addressing degrades
+- v0.4: minimum viable context window experiment, find the floor below which fast-weight addressing degrades
 - v0.5: compression layer for MCP serving
-- Longer training runs — current results are time-limited
-- Natural language benchmark performance — not mechanism activation, but demonstrable downstream improvement
+- Longer training runs (current results are time-limited)
+- Natural language benchmark performance, not mechanism activation but demonstrable downstream improvement
 - Batched evaluation (now unblocked by per-example fast state)
 
 ---
@@ -232,25 +232,25 @@ Contact: open a GitHub issue or find Russell Thomas on Reddit (u/fleeb83).
 
 ## Prior art note
 
-The only other known open-source attempt at BDH Hebbian write-back is [`adamskrodzki/bdh`](https://github.com/adamskrodzki/bdh). A full audit found the forward pass is byte-for-byte identical to upstream — a single unused `lm_gate` parameter was added but never wired in. The mechanism was not implemented.
+The only other known open-source attempt at BDH Hebbian write-back is [`adamskrodzki/bdh`](https://github.com/adamskrodzki/bdh). A full audit found the forward pass is byte-for-byte identical to upstream. A single unused `lm_gate` parameter was added but never wired in. The mechanism was not implemented.
 
 ---
 
 ## Acknowledgements
 
-- **BDH architecture**: Kosowski, Uznański, Chorowski, Stamirowska, Bartoszkiewicz — [arxiv:2509.26507](https://arxiv.org/abs/2509.26507), [github.com/pathwaycom/bdh](https://github.com/pathwaycom/bdh)
-- **Fast Weight Programmers**: Schlag, Irie, Schmidhuber — [arxiv:2102.11174](https://arxiv.org/abs/2102.11174)
-- **In-context learning as gradient descent**: von Oswald et al. — [arxiv:2212.07677](https://arxiv.org/abs/2212.07677)
-- **Autoresearch framework**: Andrej Karpathy — [github.com/karpathy/autoresearch](https://github.com/karpathy/autoresearch)
+- **BDH architecture**: Kosowski, Uznański, Chorowski, Stamirowska, Bartoszkiewicz. [arxiv:2509.26507](https://arxiv.org/abs/2509.26507), [github.com/pathwaycom/bdh](https://github.com/pathwaycom/bdh)
+- **Fast Weight Programmers**: Schlag, Irie, Schmidhuber. [arxiv:2102.11174](https://arxiv.org/abs/2102.11174)
+- **In-context learning as gradient descent**: von Oswald et al. [arxiv:2212.07677](https://arxiv.org/abs/2212.07677)
+- **Autoresearch framework**: Andrej Karpathy. [github.com/karpathy/autoresearch](https://github.com/karpathy/autoresearch)
 
 ---
 
 ## Author
 
-**Russell Thomas** — Independent researcher, Kaniva, Victoria, Australia.
+**Russell Thomas**, independent researcher, Kaniva, Victoria, Australia.
 
 No university affiliation. No corporate lab.
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
+Apache 2.0. See [LICENSE](LICENSE).
