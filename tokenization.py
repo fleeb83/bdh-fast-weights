@@ -1,178 +1,123 @@
 """
-Tokenizer and symbolic-sequence helpers for the Hebbian experiments.
+Optional raw-byte tokenizer artifact helpers for v3.
+
+The training path consumes packed uint8 shard files directly, but this module
+keeps a small serialized tokenizer artifact so the byte-level contract is
+explicit and reproducible.
 """
 
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from bpe_tokenizer import BpeTokenizer
+import numpy as np
 
-TOKENIZERS_DIR = Path(__file__).parent / "tokenizers"
+try:
+    from .address_map import ensure_address_map, load_address_map
+    from .prepare import DATA_DIR, DEFAULT_ADDRESS_MAP_LABEL, ROOT, file_sha256
+except ImportError:  # pragma: no cover - direct execution fallback
+    from address_map import ensure_address_map, load_address_map
+    from prepare import DATA_DIR, DEFAULT_ADDRESS_MAP_LABEL, ROOT, file_sha256
 
-PAD_TOKEN = "<pad>"
-BOS_TOKEN = "<bos>"
-EOS_TOKEN = "<eos>"
-SEP_TOKEN_TEXT = "<sep>"
-ANSWER_TOKEN = "<answer>"
 
-SPECIAL_TOKENS = [
-    PAD_TOKEN,
-    BOS_TOKEN,
-    EOS_TOKEN,
-    SEP_TOKEN_TEXT,
-    ANSWER_TOKEN,
-]
+RAW_BYTE_TOKENIZER_LABEL = "raw_byte_256"
+RAWBYTE_VOCAB_SIZE = 256
+ADDRESS_MAP_ROWS = 256
+ADDRESS_MAP_K = 16
+DEFAULT_ADDRESS_SPACE = 4096
+DEFAULT_ADDRESS_MAP_SEED = 1337
+TOKENIZERS_DIR = DATA_DIR / "tokenizers"
 
 
 @dataclass
-class EncodingConfig:
-    mode: str
-    label: str
-    vocab_size: int
-    pad_token_id: int
-    bos_token_id: int | None
-    eos_token_id: int | None
-    tokenizer_path: str | None = None
+class RawByteTokenizerArtifacts:
+    label: str = RAW_BYTE_TOKENIZER_LABEL
+    token_mode: str = RAW_BYTE_TOKENIZER_LABEL
+    vocab_size: int = RAWBYTE_VOCAB_SIZE
+    token_dtype: str = "uint8"
+    bytes_per_token: float = 1.0
+    address_map_label: str = DEFAULT_ADDRESS_MAP_LABEL
+    address_map_rows: int = ADDRESS_MAP_ROWS
+    address_map_k: int = ADDRESS_MAP_K
+    address_space: int = DEFAULT_ADDRESS_SPACE
+    address_map_seed: int = DEFAULT_ADDRESS_MAP_SEED
+    address_map_path: str | None = None
+    address_map_sha256: str | None = None
+    artifact_path: str | None = None
+    artifact_sha256: str | None = None
+    notes: str = "UTF-8 raw byte tokenizer with static SAC lookup."
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
-def _resolve_tokenizer_path() -> Path | None:
-    explicit = os.environ.get("HEBBIAN_TOKENIZER_PATH")
-    if explicit:
-        return Path(explicit)
-
-    label = os.environ.get("HEBBIAN_TOKENIZER_LABEL")
-    if label:
-        return TOKENIZERS_DIR / label / "tokenizer.json"
-
-    return None
+def _artifact_path(label: str) -> Path:
+    return TOKENIZERS_DIR / f"{label}.json"
 
 
-def load_encoding_config() -> EncodingConfig:
-    mode = os.environ.get("HEBBIAN_TOKEN_MODE", "int").strip().lower()
-    if mode == "int":
-        return EncodingConfig(
-            mode="int",
-            label="int",
-            vocab_size=130,
-            pad_token_id=129,
-            bos_token_id=None,
-            eos_token_id=None,
-            tokenizer_path=None,
-        )
-
-    if mode != "bpe":
-        raise ValueError(f"Unsupported HEBBIAN_TOKEN_MODE={mode!r}")
-
-    tokenizer_path = _resolve_tokenizer_path()
-    if tokenizer_path is None or not tokenizer_path.exists():
-        raise FileNotFoundError(
-            "BPE mode requires a tokenizer artifact. Run build_bpe_tokenizer.py and set "
-            "HEBBIAN_TOKENIZER_LABEL or HEBBIAN_TOKENIZER_PATH."
-        )
-
-    tokenizer = BpeTokenizer.load(tokenizer_path)
-    label = tokenizer_path.parent.name
-    return EncodingConfig(
-        mode="bpe",
-        label=label,
-        vocab_size=len(tokenizer.id_to_token),
-        pad_token_id=tokenizer.token_to_id[PAD_TOKEN],
-        bos_token_id=tokenizer.token_to_id[BOS_TOKEN],
-        eos_token_id=tokenizer.token_to_id[EOS_TOKEN],
-        tokenizer_path=str(tokenizer_path),
-    )
+def _repo_rel(path: Path) -> str:
+    return path.relative_to(ROOT).as_posix()
 
 
-def load_bpe_tokenizer(config: EncodingConfig) -> BpeTokenizer:
-    if config.mode != "bpe":
-        raise ValueError("BPE tokenizer requested for non-BPE config")
-    candidates = []
-    if config.tokenizer_path:
-        candidates.append(Path(config.tokenizer_path))
-    candidates.append(TOKENIZERS_DIR / config.label / "tokenizer.json")
-    for path in candidates:
-        if path.exists():
-            return BpeTokenizer.load(path)
-    raise FileNotFoundError(
-        f"Could not resolve tokenizer artifact for label={config.label!r}. "
-        f"Tried: {', '.join(str(path) for path in candidates)}"
-    )
-
-
-def parse_raw_row(raw_row: dict, sep_token_id: int) -> tuple[list[tuple[int, int]], int, int]:
-    tokens = list(raw_row["tokens"])
-    sep_idx = len(tokens) - 2
-    if sep_idx < 0 or tokens[sep_idx] != sep_token_id:
-        raise ValueError("Raw row does not end with the expected separator/query layout")
-    pair_tokens = tokens[:sep_idx]
-    query_key = tokens[sep_idx + 1]
-    pairs = []
-    for idx in range(0, len(pair_tokens), 2):
-        pairs.append((pair_tokens[idx], pair_tokens[idx + 1]))
-    return pairs, query_key, int(raw_row["correct_value"])
-
-
-def serialize_example_text(
-    pairs: list[tuple[int, int]],
-    query_key: int,
-    correct_value: int | None = None,
-) -> tuple[str, str | None]:
-    context = " ".join(f"K{key:03d} V{value:03d}" for key, value in pairs)
-    prompt = f"{BOS_TOKEN} {context} {SEP_TOKEN_TEXT} K{query_key:03d} {ANSWER_TOKEN}"
-    if correct_value is None:
-        return prompt, None
-    full = f"{prompt} V{correct_value:03d} {EOS_TOKEN}"
-    return prompt, full
-
-
-def convert_raw_row_to_bpe_row(raw_row: dict, *, sep_token_id: int, tokenizer: BpeTokenizer) -> dict:
-    pairs, query_key, correct_value = parse_raw_row(raw_row, sep_token_id)
-    prompt_text, full_text = serialize_example_text(pairs, query_key, correct_value)
-    assert full_text is not None
-
-    prompt_ids = tokenizer.encode(prompt_text)
-    full_ids = tokenizer.encode(full_text)
-    answer_ids = full_ids[len(prompt_ids):]
-
-    return {
-        "input_ids": full_ids[:-1],
-        "target_ids": full_ids[1:],
-        "prompt_ids": prompt_ids,
-        "answer_ids": answer_ids,
-        "prompt_text": prompt_text,
-        "answer_text": f"V{correct_value:03d}",
-        "full_text": full_text,
-        "n_back": raw_row["n_back"],
-        "seq_len": raw_row["seq_len"],
-    }
-
-
-def tokenized_dataset_path(data_dir: Path, split: str, n_back: int, config: EncodingConfig) -> Path:
-    if config.mode == "int":
-        return data_dir / f"{split}_n{n_back}.jsonl"
-    return data_dir / f"{split}_n{n_back}.{config.label}.jsonl"
-
-
-def ensure_tokenized_split(
+def ensure_raw_byte_tokenizer_artifacts(
+    label: str = RAW_BYTE_TOKENIZER_LABEL,
     *,
-    raw_path: Path,
-    encoded_path: Path,
-    sep_token_id: int,
-    tokenizer: BpeTokenizer,
-) -> None:
-    if encoded_path.exists():
-        return
+    address_map_label: str = DEFAULT_ADDRESS_MAP_LABEL,
+    address_space: int = DEFAULT_ADDRESS_SPACE,
+    seed: int = DEFAULT_ADDRESS_MAP_SEED,
+) -> RawByteTokenizerArtifacts:
+    TOKENIZERS_DIR.mkdir(parents=True, exist_ok=True)
+    address_map_path = ensure_address_map(address_map_label, k=ADDRESS_MAP_K, address_space=address_space, seed=seed)
+    artifact_path = _artifact_path(label)
+    payload = RawByteTokenizerArtifacts(
+        label=label,
+        token_mode=RAW_BYTE_TOKENIZER_LABEL,
+        vocab_size=RAWBYTE_VOCAB_SIZE,
+        token_dtype="uint8",
+        bytes_per_token=1.0,
+        address_map_label=address_map_label,
+        address_map_rows=ADDRESS_MAP_ROWS,
+        address_map_k=ADDRESS_MAP_K,
+        address_space=address_space,
+        address_map_seed=seed,
+        address_map_path=_repo_rel(address_map_path),
+        address_map_sha256=file_sha256(address_map_path),
+        artifact_path=_repo_rel(artifact_path),
+        notes="UTF-8 raw byte tokenizer with static 256x16 SAC address map.",
+    )
+    artifact_path.write_text(json.dumps(payload.to_dict(), indent=2), encoding="utf-8")
+    payload.artifact_sha256 = file_sha256(artifact_path)
+    artifact_path.write_text(json.dumps(payload.to_dict(), indent=2), encoding="utf-8")
+    payload.artifact_sha256 = file_sha256(artifact_path)
+    return payload
 
-    rows = [json.loads(line) for line in raw_path.read_text().splitlines()]
-    encoded_rows = [
-        convert_raw_row_to_bpe_row(row, sep_token_id=sep_token_id, tokenizer=tokenizer)
-        for row in rows
-    ]
-    encoded_path.write_text("\n".join(json.dumps(row) for row in encoded_rows))
+
+def load_raw_byte_tokenizer_artifacts(label: str = RAW_BYTE_TOKENIZER_LABEL) -> RawByteTokenizerArtifacts:
+    artifact_path = _artifact_path(label)
+    if not artifact_path.exists():
+        return ensure_raw_byte_tokenizer_artifacts(label)
+    return RawByteTokenizerArtifacts(**json.loads(artifact_path.read_text(encoding="utf-8")))
+
+
+def encode_text_to_raw_bytes(text: str) -> np.ndarray:
+    return np.frombuffer(text.encode("utf-8"), dtype=np.uint8)
+
+
+def load_address_map_array(address_map_label: str = DEFAULT_ADDRESS_MAP_LABEL) -> np.ndarray:
+    return load_address_map(address_map_label)
+
+
+__all__ = [
+    "ADDRESS_MAP_K",
+    "ADDRESS_MAP_ROWS",
+    "DEFAULT_ADDRESS_SPACE",
+    "RAWBYTE_VOCAB_SIZE",
+    "RAW_BYTE_TOKENIZER_LABEL",
+    "RawByteTokenizerArtifacts",
+    "encode_text_to_raw_bytes",
+    "ensure_raw_byte_tokenizer_artifacts",
+    "load_address_map_array",
+    "load_raw_byte_tokenizer_artifacts",
+]

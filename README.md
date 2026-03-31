@@ -156,29 +156,42 @@ Slow weights (`decoder`) hold general knowledge learned by gradient descent. Fas
 
 ## How to reproduce
 
+The v0.3 results use raw-byte FineWeb-Edu. Reproducing them requires downloading the corpus first.
+
 ```bash
-pip install torch numpy flask    # flask only needed for dashboard
-python prepare.py                # generates benchmarks (one-time)
+pip install torch numpy flask datasets    # datasets needed for fetch_corpus.py
+python fetch_corpus.py                    # streams FineWeb-Edu from HuggingFace (takes a while)
+python prepare.py                         # packs corpus into byte shards and builds address map
 ```
 
-Reproduce the baseline (no write-back):
+Reproduce the baseline (no fast weights):
 ```bash
-HEBBIAN_TOKEN_MODE=bpe HEBBIAN_TOKENIZER_LABEL=bpe-192 HEBBIAN_HEBBIAN_LR=0 \
-  HEBBIAN_EXPERIMENT_LABEL=baseline-bpe192-nohebb python train.py
+python train.py --label baseline_rawbyte256_validation_3h --hebbian-lr 0
 ```
 
-Reproduce the best v0.1/v0.2 run (lr=3e-3):
+Reproduce fast weights with row_topk consolidation:
 ```bash
-HEBBIAN_TOKEN_MODE=bpe HEBBIAN_TOKENIZER_LABEL=bpe-192 HEBBIAN_HEBBIAN_LR=3e-3 \
-  HEBBIAN_EXPERIMENT_LABEL=bpe-hebb-bpe192-lr3e-3 python train.py
+python train.py --label fastmem_consolidation_rawbyte256_3h
 ```
 
-Run counter-benchmarks against a saved checkpoint:
+Each run takes approximately 3 hours on a consumer GPU with 11GB VRAM.
+
+Run mechanism ablation evals against a saved checkpoint:
 ```bash
-python eval_counter.py results/checkpoints/<checkpoint>.pt
+python run_mechanism_evals.py --checkpoint results/checkpoints/<checkpoint>.pt
 ```
 
-`prepare.py` contains the fixed eval and is never modified. This prevents reward hacking. All result logs are append-only. Nothing is overwritten.
+The ablation modes (fast_read_off, fast_write_off, fast_off, slow_read_off, fast_rows_shuffled) verify that the mechanism is doing what is claimed. All result logs are append-only. Nothing is overwritten.
+
+Note: v0.1 and v0.2 results (synthetic n-back benchmarks) were produced with an earlier version of the code. The current codebase is v0.3 only.
+
+### Data directories
+
+By default, `fetch_corpus.py` and `prepare.py` write to `./data/` and training results go to `./results/`. Both are overridable:
+
+```bash
+BDH_DATA_DIR=/path/to/data BDH_RESULTS_DIR=/path/to/results python train.py ...
+```
 
 ### Hardware
 
@@ -191,13 +204,13 @@ python eval_counter.py results/checkpoints/<checkpoint>.pt
 python dashboard.py              # http://localhost:5000
 ```
 
-### Results files
+### Results files (v0.3)
 
-- `results/experiment_log.jsonl`: all BPE campaign runs with final scores
-- `results/counter_log.jsonl`: counter-benchmark results (corrected teacher-forced eval)
-- `results/counter_log_original_eval.jsonl`: original autoregressive eval results, preserved for audit
+- `results/experiment_log.jsonl`: v0.3 FineWeb-Edu training runs
 - `results/eval_history.jsonl`: per-checkpoint eval scores across training
-- `results/char_level_experiment_log.jsonl`: all 16 character-level experiments from the initial research phase
+- `results/counter_log.jsonl`: v0.2 counter-benchmark results (corrected teacher-forced eval)
+- `results/counter_log_original_eval.jsonl`: v0.2 original autoregressive eval results, preserved for audit
+- `results/char_level_experiment_log.jsonl`: v0.1 character-level experiments
 - `snapshots/exp11_xsprev_shared_fastbuf_lr1e2_bs1.py`: frozen standalone script for the first working experiment (char-level, n8=64%), independently runnable
 
 ---

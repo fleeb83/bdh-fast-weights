@@ -1,330 +1,360 @@
 """
-prepare.py - locked data generation and evaluation for Hebbian experiments.
+Fixed data/export contract for v3 (raw-byte FineWeb-Edu).
 
-This file defines the benchmark, immutable eval path, and result logging.
+v3 uses a raw UTF-8 byte tokenizer (vocab 256) plus a serialized static
+address-map artifact that maps each byte ID to k active synaptic indices.
+
+Directory layout (all overridable via env vars):
+
+  BDH_DATA_DIR    -- root for downloaded corpus, packed shards, address maps
+                     default: ./data
+  BDH_RESULTS_DIR -- root for experiment logs and checkpoints
+                     default: ./results
+
+Run fetch_corpus.py first to populate BDH_DATA_DIR, then prepare.py to
+pack shards. train.py reads from BDH_DATA_DIR and writes to BDH_RESULTS_DIR.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
-import random
-from contextlib import nullcontext
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Callable
 
-import torch
 
-from tokenization import (
-    ensure_tokenized_split,
-    load_bpe_tokenizer,
-    load_encoding_config,
-    tokenized_dataset_path,
-)
-
-# Integer benchmark constants retained for the canonical baseline.
-VOCAB_SIZE = 128
-KEY_RANGE = (0, 64)
-VAL_RANGE = (64, 128)
-SEP_TOKEN = 128
-PAD_TOKEN = 129
-MODEL_VOCAB = 130
-
-TRAIN_SEED = 42
-EVAL_SEED = 99
-N_TRAIN = 8000
-N_EVAL = 1000
-
-DATA_DIR = Path(__file__).parent / "data"
-DATA_DIR.mkdir(exist_ok=True)
-
-RESULTS_DIR = Path(os.environ.get("HEBBIAN_RESULTS_DIR", str(Path(__file__).parent / "results")))
-RESULTS_DIR.mkdir(exist_ok=True)
-
+ROOT = Path(__file__).parent
+DATA_DIR = Path(os.environ.get("BDH_DATA_DIR", str(ROOT / "data")))
+DATASETS_DIR = DATA_DIR / "datasets"
+ADDRESS_MAPS_DIR = DATA_DIR / "address_maps"
+TOKENIZERS_DIR = DATA_DIR / "tokenizers"
+DOCS_SELECTED_PATH = DATA_DIR / "docs_selected.jsonl"
+DOCS_SOURCE_MANIFEST_PATH = DATA_DIR / "docs_selected.source_manifest.json"
+DATA_MANIFEST_PATH = DATA_DIR / "manifest.json"
+RESULTS_DIR = Path(os.environ.get("BDH_RESULTS_DIR", str(ROOT / "results")))
 EXPERIMENT_LOG = RESULTS_DIR / "experiment_log.jsonl"
 
-
-def _generate_sequences(n_back: int, seq_len: int, count: int, seed: int) -> list[dict]:
-    rng = random.Random(seed)
-    sequences = []
-    for _ in range(count):
-        keys = [rng.randint(*KEY_RANGE) for _ in range(seq_len)]
-        values = [rng.randint(*VAL_RANGE) for _ in range(seq_len)]
-        pairs = list(zip(keys, values))
-        query_idx = rng.randint(seq_len - n_back, seq_len - 1)
-        query_key, correct_value = pairs[query_idx]
-        tokens = []
-        for key, value in pairs:
-            tokens += [key, value]
-        tokens += [SEP_TOKEN, query_key]
-        sequences.append(
-            {
-                "tokens": tokens,
-                "correct_value": correct_value,
-                "n_back": n_back,
-                "seq_len": seq_len,
-            }
-        )
-    return sequences
+RAWBYTE_VOCAB_SIZE = 256
+DEFAULT_SAC_K = 16
+DEFAULT_ADDRESS_SPACE = 4096
+DEFAULT_ADDRESS_MAP_LABEL = "rawbyte256_sac16_default"
+DEFAULT_DATASET_NAME = "fineweb_edu_rawbyte256_sac16"
 
 
-def raw_dataset_path(n_back: int, split: str) -> Path:
-    return DATA_DIR / f"{split}_n{n_back}.jsonl"
+@dataclass
+class AddressMapArtifact:
+    label: str
+    vocab_size: int
+    k: int
+    address_space: int
+    seed: int
+    path: str
+    sha256: str
+    notes: str = ""
 
 
-def prepare_raw_data() -> None:
-    configs = [
-        {"n_back": 2, "seq_len": 8},
-        {"n_back": 4, "seq_len": 16},
-        {"n_back": 8, "seq_len": 32},
-    ]
-    for cfg in configs:
-        n_back = cfg["n_back"]
-        train_path = raw_dataset_path(n_back, "train")
-        eval_path = raw_dataset_path(n_back, "eval")
-        if not train_path.exists():
-            seqs = _generate_sequences(n_back, cfg["seq_len"], N_TRAIN, TRAIN_SEED)
-            train_path.write_text("\n".join(json.dumps(seq) for seq in seqs))
-            print(f"Generated {train_path}")
-        if not eval_path.exists():
-            seqs = _generate_sequences(n_back, cfg["seq_len"], N_EVAL, EVAL_SEED)
-            eval_path.write_text("\n".join(json.dumps(seq) for seq in seqs))
-            print(f"Generated {eval_path}")
+@dataclass
+class DatasetExport:
+    name: str
+    tokenizer_mode: str
+    vocab_size: int
+    token_dtype: str
+    address_map_label: str
+    address_map_sha256: str
+    train_shards: int
+    val_shards: int
+    train_docs: int | None = None
+    val_docs: int | None = None
+    total_train_tokens: int | None = None
+    total_val_tokens: int | None = None
+    export_manifest_path: str | None = None
+    split_contract: str = ""
+    docs_source_manifest_sha256: str | None = None
+    source: str = "local"
+    files_train: list[str] = field(default_factory=list)
+    files_val: list[str] = field(default_factory=list)
+    sha256_train: list[str] = field(default_factory=list)
+    sha256_val: list[str] = field(default_factory=list)
+    notes: str = ""
+
+
+@dataclass
+class DataManifest:
+    datasets: list[DatasetExport]
+    address_maps: list[AddressMapArtifact]
+    docs_selected_path: str | None = None
+    docs_selected_sha256: str | None = None
+    docs_source_manifest_path: str | None = None
+    docs_source_manifest_sha256: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "datasets": [asdict(item) for item in self.datasets],
+            "address_maps": [asdict(item) for item in self.address_maps],
+            "docs_selected_path": self.docs_selected_path,
+            "docs_selected_sha256": self.docs_selected_sha256,
+            "docs_source_manifest_path": self.docs_source_manifest_path,
+            "docs_source_manifest_sha256": self.docs_source_manifest_sha256,
+        }
+
+
+def _coerce_dataset_entry(row: dict) -> DatasetExport:
+    payload = {
+        "name": row["name"],
+        "tokenizer_mode": row.get("tokenizer_mode", "raw_byte_256"),
+        "vocab_size": row.get("vocab_size", row.get("byte_vocab_size", RAWBYTE_VOCAB_SIZE)),
+        "token_dtype": row.get("token_dtype", row.get("tokens_dtype", "uint8")),
+        "address_map_label": row.get("address_map_label", row.get("tokenizer_name", DEFAULT_ADDRESS_MAP_LABEL)),
+        "address_map_sha256": row.get("address_map_sha256", ""),
+        "train_shards": row.get("train_shards", len(row.get("files_train", []))),
+        "val_shards": row.get("val_shards", len(row.get("files_val", []))),
+        "train_docs": row.get("train_docs"),
+        "val_docs": row.get("val_docs"),
+        "total_train_tokens": row.get("total_train_tokens"),
+        "total_val_tokens": row.get("total_val_tokens"),
+        "export_manifest_path": row.get("export_manifest_path"),
+        "split_contract": row.get("split_contract", ""),
+        "docs_source_manifest_sha256": row.get("docs_source_manifest_sha256"),
+        "source": row.get("source", "local"),
+        "files_train": row.get("files_train", []),
+        "files_val": row.get("files_val", []),
+        "sha256_train": row.get("sha256_train", []),
+        "sha256_val": row.get("sha256_val", []),
+        "notes": row.get("notes", ""),
+    }
+    return DatasetExport(**payload)
+
+
+def _coerce_address_map_entry(row: dict) -> AddressMapArtifact:
+    payload = {
+        "label": row["label"],
+        "vocab_size": row.get("vocab_size", row.get("address_map_rows", RAWBYTE_VOCAB_SIZE)),
+        "k": row.get("k", row.get("address_map_k", DEFAULT_SAC_K)),
+        "address_space": row.get("address_space", DEFAULT_ADDRESS_SPACE),
+        "seed": row.get("seed", 1337),
+        "path": row.get("path", row.get("address_map_path", "")),
+        "sha256": row.get("sha256", row.get("address_map_sha256", "")),
+        "notes": row.get("notes", ""),
+    }
+    return AddressMapArtifact(**payload)
+
+
+def ensure_layout() -> None:
+    for path in (
+        DATASETS_DIR,
+        ADDRESS_MAPS_DIR,
+        TOKENIZERS_DIR,
+        RESULTS_DIR,
+        RESULTS_DIR / "checkpoints",
+        RESULTS_DIR / "manifests",
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def dataset_dir(name: str) -> Path:
+    return DATASETS_DIR / name
+
+
+def address_map_paths(label: str) -> tuple[Path, Path]:
+    folder = ADDRESS_MAPS_DIR / label
+    return folder / "address_map.npy", folder / "address_map.json"
+
+
+def export_bin_path(dataset_name: str, split: str, shard_idx: int) -> Path:
+    return dataset_dir(dataset_name) / f"pretokenized_{split}_{shard_idx:06d}.bin"
+
+
+def default_dataset_name() -> str:
+    return DEFAULT_DATASET_NAME
+
+
+def load_data_manifest() -> dict | None:
+    if not DATA_MANIFEST_PATH.exists():
+        return None
+    return json.loads(DATA_MANIFEST_PATH.read_text(encoding="utf-8"))
+
+
+def write_data_manifest(address_maps: list[AddressMapArtifact], datasets: list[DatasetExport]) -> Path:
+    ensure_layout()
+    payload = DataManifest(
+        datasets=datasets,
+        address_maps=address_maps,
+        docs_selected_path=DOCS_SELECTED_PATH.relative_to(ROOT).as_posix() if DOCS_SELECTED_PATH.exists() else None,
+        docs_selected_sha256=file_sha256(DOCS_SELECTED_PATH) if DOCS_SELECTED_PATH.exists() else None,
+        docs_source_manifest_path=(
+            DOCS_SOURCE_MANIFEST_PATH.relative_to(ROOT).as_posix() if DOCS_SOURCE_MANIFEST_PATH.exists() else None
+        ),
+        docs_source_manifest_sha256=(
+            file_sha256(DOCS_SOURCE_MANIFEST_PATH) if DOCS_SOURCE_MANIFEST_PATH.exists() else None
+        ),
+    )
+    DATA_MANIFEST_PATH.write_text(json.dumps(payload.to_dict(), indent=2), encoding="utf-8")
+    return DATA_MANIFEST_PATH
+
+
+def upsert_address_map_manifest_entry(entry: AddressMapArtifact) -> Path:
+    manifest = load_data_manifest() or {"datasets": [], "address_maps": []}
+    kept = [row for row in manifest.get("address_maps", []) if row.get("label") != entry.label]
+    address_maps = [_coerce_address_map_entry(row) for row in kept]
+    address_maps.append(entry)
+    datasets = [_coerce_dataset_entry(row) for row in manifest.get("datasets", []) if "name" in row]
+    return write_data_manifest(address_maps=address_maps, datasets=datasets)
+
+
+def upsert_dataset_manifest_entry(entry: DatasetExport) -> Path:
+    manifest = load_data_manifest() or {"datasets": [], "address_maps": []}
+    kept = [row for row in manifest.get("datasets", []) if row.get("name") != entry.name]
+    datasets = [_coerce_dataset_entry(row) for row in kept]
+    datasets.append(entry)
+    address_maps = [_coerce_address_map_entry(row) for row in manifest.get("address_maps", []) if "label" in row]
+    return write_data_manifest(address_maps=address_maps, datasets=datasets)
+
+
+def require_frozen_docs_cache() -> tuple[Path, Path]:
+    if not DOCS_SELECTED_PATH.exists():
+        raise FileNotFoundError(f"Missing frozen docs cache: {DOCS_SELECTED_PATH}")
+    if not DOCS_SOURCE_MANIFEST_PATH.exists():
+        raise FileNotFoundError(f"Missing docs source manifest: {DOCS_SOURCE_MANIFEST_PATH}")
+    return DOCS_SELECTED_PATH, DOCS_SOURCE_MANIFEST_PATH
+
+
+def validate_docs_cache_against_manifest() -> None:
+    manifest = load_data_manifest()
+    if manifest is None or not DOCS_SELECTED_PATH.exists():
+        return
+    expected = manifest.get("docs_selected_sha256")
+    if expected and file_sha256(DOCS_SELECTED_PATH) != expected:
+        raise ValueError("docs_selected.jsonl hash does not match data manifest")
+    expected_source = manifest.get("docs_source_manifest_sha256")
+    if expected_source and DOCS_SOURCE_MANIFEST_PATH.exists() and file_sha256(DOCS_SOURCE_MANIFEST_PATH) != expected_source:
+        raise ValueError("docs_selected.source_manifest.json hash does not match data manifest")
+
+
+def validate_dataset_export(name: str, *, require_full_val: bool = True, required_train_prefix: int | None = None) -> None:
+    manifest = load_data_manifest()
+    if manifest is None:
+        raise FileNotFoundError("Missing data manifest")
+    entry = next((row for row in manifest.get("datasets", []) if row.get("name") == name), None)
+    if entry is None:
+        raise KeyError(f"Unknown dataset export: {name}")
+
+    files_train = entry.get("files_train", [])
+    files_val = entry.get("files_val", [])
+    if required_train_prefix is not None and len(files_train) < required_train_prefix:
+        raise ValueError(f"Dataset {name} only has {len(files_train)} train shards, need {required_train_prefix}")
+    if require_full_val and len(files_val) != int(entry.get("val_shards", 0)):
+        raise ValueError(f"Dataset {name} val split is incomplete")
+
+    file_rows = list(zip(files_train, entry.get("sha256_train", []), strict=False)) + list(
+        zip(files_val, entry.get("sha256_val", []), strict=False)
+    )
+    for rel, expected_sha in file_rows:
+        path = ROOT / rel
+        if not path.exists():
+            raise FileNotFoundError(f"Missing dataset shard: {path}")
+        if expected_sha and file_sha256(path) != expected_sha:
+            raise ValueError(f"Dataset shard hash mismatch: {path}")
+
+
+def register_published_export(
+    *,
+    dataset_name: str,
+    address_map_label: str,
+    address_map_sha256: str,
+    train_files: list[Path],
+    val_files: list[Path],
+    train_docs: int | None = None,
+    val_docs: int | None = None,
+    total_train_tokens: int | None = None,
+    total_val_tokens: int | None = None,
+    export_manifest_path: Path | None = None,
+    split_contract: str = "",
+    docs_source_manifest_sha256: str | None = None,
+    source: str = "published",
+    notes: str = "",
+) -> Path:
+    train_rel = [path.relative_to(ROOT).as_posix() for path in train_files]
+    val_rel = [path.relative_to(ROOT).as_posix() for path in val_files]
+    entry = DatasetExport(
+        name=dataset_name,
+        tokenizer_mode="raw_byte_256",
+        vocab_size=RAWBYTE_VOCAB_SIZE,
+        token_dtype="uint8",
+        address_map_label=address_map_label,
+        address_map_sha256=address_map_sha256,
+        train_shards=len(train_files),
+        val_shards=len(val_files),
+        train_docs=train_docs,
+        val_docs=val_docs,
+        total_train_tokens=total_train_tokens,
+        total_val_tokens=total_val_tokens,
+        export_manifest_path=(
+            export_manifest_path.relative_to(ROOT).as_posix() if export_manifest_path is not None else None
+        ),
+        split_contract=split_contract,
+        docs_source_manifest_sha256=docs_source_manifest_sha256,
+        source=source,
+        files_train=train_rel,
+        files_val=val_rel,
+        sha256_train=[file_sha256(path) for path in train_files],
+        sha256_val=[file_sha256(path) for path in val_files],
+        notes=notes,
+    )
+    return upsert_dataset_manifest_entry(entry)
+
+
+def evaluate_all(dataset_name: str | None = None) -> dict:
+    target = dataset_name or DEFAULT_DATASET_NAME
+    validate_dataset_export(target)
+    manifest = load_data_manifest()
+    if manifest is None:
+        raise FileNotFoundError("Missing data manifest")
+    entry = next((row for row in manifest.get("datasets", []) if row.get("name") == target), None)
+    if entry is None:
+        raise KeyError(f"Unknown dataset export: {target}")
+    return {
+        "dataset_name": target,
+        "tokenizer_mode": entry.get("tokenizer_mode"),
+        "vocab_size": entry.get("vocab_size", entry.get("byte_vocab_size", RAWBYTE_VOCAB_SIZE)),
+        "token_dtype": entry.get("token_dtype", entry.get("tokens_dtype", "uint8")),
+        "address_map_label": entry.get("address_map_label"),
+        "address_map_sha256": entry.get("address_map_sha256"),
+        "train_shards": entry.get("train_shards"),
+        "val_shards": entry.get("val_shards"),
+        "train_docs": entry.get("train_docs"),
+        "val_docs": entry.get("val_docs"),
+        "total_train_tokens": entry.get("total_train_tokens"),
+        "total_val_tokens": entry.get("total_val_tokens"),
+    }
 
 
 def prepare_data() -> None:
-    prepare_raw_data()
-    encoding = load_encoding_config()
-    if encoding.mode == "int":
-        return
+    ensure_layout()
+    try:
+        from .tokenization import ensure_raw_byte_tokenizer_artifacts
+    except ImportError:
+        from tokenization import ensure_raw_byte_tokenizer_artifacts
 
-    tokenizer = load_bpe_tokenizer(encoding)
-    for n_back in (2, 4, 8):
-        for split in ("train", "eval"):
-            ensure_tokenized_split(
-                raw_path=raw_dataset_path(n_back, split),
-                encoded_path=tokenized_dataset_path(DATA_DIR, split, n_back, encoding),
-                sep_token_id=SEP_TOKEN,
-                tokenizer=tokenizer,
-            )
+    ensure_raw_byte_tokenizer_artifacts()
 
 
-class NBackDataset(torch.utils.data.Dataset):
-    def __init__(self, path: Path):
-        self.rows = [json.loads(line) for line in Path(path).read_text().splitlines()]
-
-    def __len__(self) -> int:
-        return len(self.rows)
-
-    def __getitem__(self, idx: int):
-        row = self.rows[idx]
-        if "input_ids" in row:
-            x = torch.tensor(row["input_ids"], dtype=torch.long)
-            y = torch.tensor(row["target_ids"], dtype=torch.long)
-            return x, y
-
-        tokens = row["tokens"]
-        x = torch.tensor(tokens, dtype=torch.long)
-        y = torch.tensor(tokens[1:] + [row["correct_value"]], dtype=torch.long)
-        return x, y
-
-
-def get_dataset_path(n_back: int, split: str) -> Path:
-    encoding = load_encoding_config()
-    return tokenized_dataset_path(DATA_DIR, split, n_back, encoding)
-
-
-def get_dataloader(n_back: int, split: str, batch_size: int, shuffle: bool = True):
-    ds = NBackDataset(get_dataset_path(n_back, split))
-    return torch.utils.data.DataLoader(ds, batch_size=batch_size, shuffle=shuffle)
-
-
-def eval_autocast_context(device: str):
-    if device != "cuda":
-        return nullcontext()
-    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-    return torch.autocast(device_type="cuda", dtype=dtype)
-
-
-def _parse_eval_nbacks(final: bool) -> list[int]:
-    if final:
-        raw = os.environ.get("HEBBIAN_FINAL_EVAL_NBACKS", "2,4,8")
-    else:
-        raw = os.environ.get("HEBBIAN_TRAIN_EVAL_NBACKS", "2,4,8")
-    values = []
-    for part in raw.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        values.append(int(part))
-    return values or [8]
-
-
-@torch.no_grad()
-def _evaluate_int(
-    model,
-    n_back: int,
-    device: str,
-    batch_size: int,
-    progress_callback: Callable[..., None] | None = None,
-) -> float:
-    model.eval()
-    loader = get_dataloader(n_back, "eval", batch_size, shuffle=False)
-    correct = 0
-    total = 0
-    dataset_total = len(loader.dataset)
-    for x, y in loader:
-        if hasattr(model, "decoder_fast"):
-            model.decoder_fast.zero_()
-        x, y = x.to(device), y.to(device)
-        with eval_autocast_context(device):
-            logits, _ = model(x)
-        pred = logits[:, -1, :].argmax(dim=-1)
-        target = y[:, -1]
-        correct += (pred == target).sum().item()
-        total += target.shape[0]
-        if progress_callback and (total == dataset_total or total % 128 == 0):
-            progress_callback(
-                n_back=n_back,
-                done=total,
-                total=dataset_total,
-                accuracy=(correct / total) if total else None,
-            )
-    return correct / total
-
-
-def _collate_bpe_eval_rows(rows: list[dict], pad_token_id: int) -> tuple[torch.Tensor, list[tuple[int, list[int]]]]:
-    max_len = max(len(row["input_ids"]) for row in rows)
-    batch = torch.full((len(rows), max_len), pad_token_id, dtype=torch.long)
-    spans = []
-    for row_idx, row in enumerate(rows):
-        ids = row["input_ids"]
-        batch[row_idx, : len(ids)] = torch.tensor(ids, dtype=torch.long)
-        answer_ids = list(row["answer_ids"])
-        answer_start = len(row["prompt_ids"]) - 1
-        spans.append((answer_start, answer_ids))
-    return batch, spans
-
-
-@torch.no_grad()
-def _evaluate_bpe(
-    model,
-    n_back: int,
-    device: str,
-    batch_size: int,
-    limit: int | None = None,
-    progress_callback: Callable[..., None] | None = None,
-) -> float:
-    model.eval()
-    encoding = load_encoding_config()
-    ds = NBackDataset(get_dataset_path(n_back, "eval"))
-    correct = 0
-    total = 0
-    rows = ds.rows[:limit] if limit is not None else ds.rows
-    rows_total = len(rows)
-    for start_idx in range(0, len(rows), batch_size):
-        batch_rows = rows[start_idx : start_idx + batch_size]
-        x, spans = _collate_bpe_eval_rows(batch_rows, encoding.pad_token_id)
-        x = x.to(device)
-        if hasattr(model, "decoder_fast"):
-            model.decoder_fast.zero_()
-        with eval_autocast_context(device):
-            logits, _ = model(x)
-        pred_ids = logits.argmax(dim=-1).cpu()
-        for row_idx, (answer_start, answer_ids) in enumerate(spans):
-            answer_end = answer_start + len(answer_ids)
-            pred_span = pred_ids[row_idx, answer_start:answer_end].tolist()
-            correct += int(pred_span == answer_ids)
-            total += 1
-        if progress_callback and (total == rows_total or total % max(batch_size * 25, 25) == 0):
-            progress_callback(
-                n_back=n_back,
-                done=total,
-                total=rows_total,
-                accuracy=(correct / total) if total else None,
-            )
-    return correct / total
-
-
-@torch.no_grad()
-def evaluate(
-    model,
-    n_back: int,
-    device: str,
-    batch_size: int = 128,
-    progress_callback: Callable[..., None] | None = None,
-) -> float:
-    """
-    Returns accuracy on the held-out eval set (EVAL_SEED=99).
-
-    Integer mode uses final-token accuracy.
-    BPE mode uses exact answer-span accuracy under a single teacher-forced pass.
-    """
-    encoding = load_encoding_config()
-    if encoding.mode == "bpe":
-        default_bpe_batch_size = int(os.environ.get("HEBBIAN_EVAL_BATCH_SIZE_BPE", "16"))
-        if getattr(getattr(model, "config", None), "hebbian_lr", 0.0) > 0.0:
-            default_bpe_batch_size = 1
-        bpe_batch_size = default_bpe_batch_size
-        limit_raw = os.environ.get("HEBBIAN_EVAL_LIMIT_BPE")
-        limit = int(limit_raw) if limit_raw and limit_raw.strip() else None
-        return _evaluate_bpe(
-            model,
-            n_back,
-            device,
-            batch_size=bpe_batch_size,
-            limit=limit,
-            progress_callback=progress_callback,
-        )
-
-    has_fast = hasattr(model, "decoder_fast")
-    if has_fast:
-        batch_size = 1
-    return _evaluate_int(model, n_back, device, batch_size, progress_callback=progress_callback)
-
-
-def evaluate_all(model, device: str, *, final: bool = False, progress_callback: Callable[..., None] | None = None) -> dict:
-    metrics = {}
-    for n_back in _parse_eval_nbacks(final):
-        if progress_callback:
-            progress_callback(n_back=n_back, done=0, total=None, accuracy=None)
-        metrics[f"n{n_back}"] = evaluate(
-            model,
-            n_back=n_back,
-            device=device,
-            progress_callback=progress_callback,
-        )
-    if final:
-        for n_back in (2, 4, 8):
-            if f"n{n_back}" in metrics:
-                continue
-            if progress_callback:
-                progress_callback(n_back=n_back, done=0, total=None, accuracy=None)
-            metrics.setdefault(
-                f"n{n_back}",
-                evaluate(model, n_back=n_back, device=device, progress_callback=progress_callback),
-            )
-    return metrics
-
-
-def log_result(label: str, scores: dict, notes: str = "") -> dict:
-    import time
-
-    entry = {
-        "label": label,
-        "n2": scores["n2"],
-        "n4": scores["n4"],
-        "n8": scores["n8"],
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "notes": notes,
-    }
-    with open(EXPERIMENT_LOG, "a") as handle:
+def log_result(label: str, metrics: dict, notes: str = "") -> dict:
+    ensure_layout()
+    entry = {"label": label, **metrics, "notes": notes}
+    with open(EXPERIMENT_LOG, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry) + "\n")
-    print(f"[{label}]  n2={scores['n2']:.1%}  n4={scores['n4']:.1%}  n8={scores['n8']:.1%}")
     return entry
 
 
 if __name__ == "__main__":
-    print("Preparing data...")
     prepare_data()
-    print("Done. Run train.py to start experiments.")
+    print("v3 data/export contract ready")
