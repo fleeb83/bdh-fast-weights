@@ -18,7 +18,7 @@ Yes.
 
 `fast_state_norm` stabilises near 11.2 and holds there across the full training run. Baseline `fast_state_norm` is 0.0 throughout.
 
-By mid-training, `fast_contrib_norm` is approximately 6.9 and `slow_contrib_norm` is approximately 3.5. The model learned to use the fast buffer. The architecture did not force this.
+By mid-training (around step 6,000 of ~12,000), `fast_contrib_norm` is approximately 6.9 and `slow_contrib_norm` is approximately 3.5. The model learned to use the fast buffer. The architecture did not force this.
 
 ---
 
@@ -44,6 +44,20 @@ Raw byte tokenisation is a deliberate choice. BDH's addressing mechanism uses to
 
 ---
 
+## What this is
+
+The Hebbian fast-weight mechanism is active on natural language. fast_state_norm grows from step 1 and holds near 11.2. Baseline fast_state_norm is 0.0. The model learned to use the fast buffer. Fast weights contribute roughly twice as much as slow weights by mid-training.
+
+Row_topk consolidation improves BPB by ~0.009 at 2 of 3 seeds on FineWeb-Edu. A third seed (2027) did not reproduce it.
+
+## What this is not
+
+Not validated on general language modelling tasks beyond the runs described. The BPB improvement is real at 2 seeds and small. These are 3-hour runs on a small model trained on raw bytes. Not a replacement for RAG or fine-tuning. Not Pathway's internal BDH implementation.
+
+Eval is teacher-forced. Reported accuracies reflect teacher-forced exact-span scoring, not autoregressive generation.
+
+---
+
 ## What changed in v0.3
 
 - Per-example fast state: the bs=1 constraint is eliminated. v0.3 uses shape `[batch, memory_size, d_model]`. At bs=48, each training step processes 9,216 tokens vs 66 in v0.2, which is 140x more per step at similar step cost.
@@ -55,8 +69,6 @@ Raw byte tokenisation is a deliberate choice. BDH's addressing mechanism uses to
 ```python
 logits, next_fast_state = model(tokens, fast_state=fast_state)
 ```
-
-Fast weight training runs at ~10,600 tokens/s. The baseline runs at ~65,000 tokens/s.
 
 ---
 
@@ -187,20 +199,6 @@ python dashboard.py              # http://localhost:5000
 - `results/eval_history.jsonl`: per-checkpoint eval scores across training
 - `results/char_level_experiment_log.jsonl`: all 16 character-level experiments from the initial research phase
 - `snapshots/exp11_xsprev_shared_fastbuf_lr1e2_bs1.py`: frozen standalone script for the first working experiment (char-level, n8=64%), independently runnable
-
----
-
-## What this is
-
-The Hebbian fast-weight mechanism is active on natural language. fast_state_norm grows from step 1 and holds near 11.2. Baseline fast_state_norm is 0.0. The model learned to use the fast buffer. Fast weights contribute roughly twice as much as slow weights by mid-training.
-
-Row_topk consolidation improves BPB by ~0.009 at 2 of 3 seeds on FineWeb-Edu. A third seed (2027) did not reproduce it.
-
-## What this is not
-
-Not validated on general language modelling tasks beyond the runs described. The BPB improvement is real at 2 seeds and small. These are 3-hour runs on a small model trained on raw bytes. Not a replacement for RAG or fine-tuning. Not Pathway's internal BDH implementation.
-
-Eval is teacher-forced. Reported accuracies reflect teacher-forced exact-span scoring, not autoregressive generation.
 
 ---
 
